@@ -1,12 +1,10 @@
-// api/analyze.js - Corrected Serverless Function
+// api/analyze.js - Using CommonJS (require) for maximum Vercel compatibility
 
-// Ensure you are using the V3 syntax for node-fetch import
-import fetch from 'node-fetch';
-import cheerio from 'cheerio';
+// Use require() for packages that are sometimes tricky with Vercel's ES Modules
+const fetch = require('node-fetch');
+const cheerio = require('cheerio');
 
-// Vercel automatically exposes environment variables prefixed with VITE_ 
-// in Serverless Functions.
-// NOTE: Vercel needs the 'Content-Type' header for JSON body requests.
+// Constants are read directly from Vercel's environment variables
 const GEMINI_API_KEY = process.env.VITE_GEMINI_API_KEY; 
 const BSSC_RPC_URL = 'https://bssc-rpc.bssc.live';
 const BSSC_EXPLORER_URL = 'https://explorer.bssc.live';
@@ -24,21 +22,30 @@ async function fetchExplorerData(id) {
         const $ = cheerio.load(html);
         const title = $('title').text();
         
-        // This extraction is reliable thanks to cheerio
-        const text = $('body').text().slice(0, 1000).replace(/\s+/g, ' ').trim(); 
+        // Use a more robust check for body content
+        const bodyContent = $('body').text();
+        const text = bodyContent.slice(0, 1000).replace(/\s+/g, ' ').trim(); 
         
         return { summary: `Parsed ${title}: ${text.slice(0, 500)}...` };
     } catch (err) {
         console.error("Explorer fetch failed:", err);
-        // Ensure a fallback context is returned even on failure
         return { summary: `Error fetching BSSC Explorer data for ${id}.` };
     }
 }
 
 // --- Main Handler ---
 
-export default async function handler(req, res) {
-    // 1. Basic validation and method check
+// Vercel Serverless Function export uses the CommonJS module.exports syntax
+module.exports = async function handler(req, res) {
+    // Set headers for CORS if needed, but Vercel usually handles this
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+    if (req.method === 'OPTIONS') {
+        return res.status(200).end();
+    }
+    
     if (req.method !== 'POST') {
         return res.status(405).send('Method Not Allowed');
     }
@@ -49,25 +56,23 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: 'Query is required' });
     }
     
-    // Check if API Key is available
-    if (!GEMINI_API_KEY) {
-        return res.status(500).json({ error: 'GEMINI_API_KEY is missing. Check Vercel Environment Variables.' });
+    if (!GEMINI_API_KEY || GEMINI_API_KEY.includes('YOUR_ACTUAL_GEMINI_API_KEY')) {
+        // This response is explicit about the key being the issue
+        return res.status(500).json({ error: 'Configuration Error: GEMINI_API_KEY is missing or invalid. Check Vercel Environment Variables.' });
     }
 
     try {
-        // 2. Data Context Fetching
-        let context = 'No specific BSSC data context needed.'; // Default context
+        let context = 'No specific BSSC data context needed.'; 
         if (query.length > 30) {
             const explorer = await fetchExplorerData(query);
             context = explorer.summary;
         }
 
-        // 3. AI Request
+        // --- Call Gemini API ---
         const aiRes = await fetch(
             `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro-exp-09-2025:generateContent?key=${GEMINI_API_KEY}`,
             {
                 method: 'POST',
-                // *** CRITICAL FIX: Ensure Content-Type is set for the JSON body ***
                 headers: { 'Content-Type': 'application/json' }, 
                 body: JSON.stringify({
                     contents: [
@@ -84,24 +89,20 @@ User query: ${query}`
             }
         );
         
-        // Check for non-200 responses from Gemini
         if (!aiRes.ok) {
             const errorText = await aiRes.text();
-            console.error('Gemini API Error Status:', aiRes.status, errorText);
-            // Return an error to the frontend if Gemini fails
+            // Return detailed error status from Gemini
             return res.status(502).json({ 
-                error: `Gemini API call failed with status ${aiRes.status}. Details: ${errorText.slice(0, 100)}...` 
+                error: `Gemini API failed with status ${aiRes.status}. Check Vercel logs for full error.` 
             });
         }
 
         const data = await aiRes.json();
         const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || 'No legible response from AI.';
 
-        // 4. Success Response
         res.status(200).json({ answer: text });
     } catch (err) {
-        console.error('API Analyze Runtime Error:', err);
-        // If an unexpected exception occurs
-        res.status(500).json({ error: `Internal Server Error: ${err.message}` });
+        // Catch any remaining runtime errors
+        res.status(500).json({ error: `Internal Server Error: ${err.message}. Please check Vercel deployment logs.` });
     }
 }
